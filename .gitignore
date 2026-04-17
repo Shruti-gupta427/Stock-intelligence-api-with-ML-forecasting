@@ -1,0 +1,32 @@
+# Python 
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Databases
+*.db
+*.sqlite3
+
+# Docker
+.dockerignore
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Research/Data
+.ipynb_checkpoints/
+*.csv
+!template.csv
