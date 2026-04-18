@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.concurrency import run_in_threadpool
 from performance import fetch_and_process
+import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 import time
@@ -12,6 +13,7 @@ import threading
 import redis
 import pickle
 import os
+
 
 
 logging.basicConfig(level=logging.INFO)
@@ -221,6 +223,48 @@ async def health_check():
         "redis": redis_status,
         "timestamp": time.time()
     }
+# data visulaization without any frontend
+@app.get("/chart/{symbol}", response_class=HTMLResponse, tags=["Visualization"])
+async def get_chart(symbol: str):
+    result = await run_in_threadpool(get_data_with_cache, symbol.upper())
+    if result[0] is None:
+        raise HTTPException(status_code=404, detail="Symbol not found.")
+
+    df = result[0]
+    company = COMPANY_MAP.get(symbol.upper(), symbol.upper())
+
+    fig = go.Figure()
+
+
+    fig.add_trace(go.Candlestick(
+        x=df['Date'],
+        open=df['OPEN'],
+        high=df['HIGH'],
+        low=df['LOW'],
+        close=df['CLOSE'],
+        name='Price'
+    ))
+    # MA7
+    fig.add_trace(go.Scatter(
+        x=df['Date'], y=df['MA_7'],
+        mode='lines', name='MA 7',
+        line=dict(color='orange', width=1.5)
+    ))
+    # MA20
+    fig.add_trace(go.Scatter(
+        x=df['Date'], y=df['MA_20'],
+        mode='lines', name='MA 20',
+        line=dict(color='blue', width=1.5)
+    ))
+    fig.update_layout(
+        title=f"{company} — Last 30 Days",
+        xaxis_title="Date",
+        yaxis_title="Price (USD)",
+        template="plotly_dark",
+        height=600,
+        xaxis_rangeslider_visible=False
+    )
+    return fig.to_html(full_html=True, include_plotlyjs='cdn')
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
