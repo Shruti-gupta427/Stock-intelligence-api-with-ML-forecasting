@@ -1,121 +1,177 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.concurrency import run_in_threadpool
 from performance import fetch_and_process
 import pandas as pd
+import numpy as np
 import time
 import io
 import logging
+import asyncio
+import threading
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title=" Stock Intelligence API",
-    description="Advanced Financial Data API with ML Forecasting and Technical Indicators",
-)
+app = FastAPI(title="Stock Intelligence API")
 
-# caching
+
+COMPANY_MAP = {
+    "AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation",
+    "TSLA": "Tesla, Inc.", "GOOGL": "Alphabet Inc. (Google)",
+    "TCS.NS": "Tata Consultancy Services Limited",
+    "INFY.NS": "Infosys Limited", "RELIANCE.NS": "Reliance Industries Limited"
+}
+
 cache = {}
-CACHE_EXPIRY = 3600  # 1 Hour
+CACHE_EXPIRY = 3600 
+
+
+def clean_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_for_json(v) for v in obj]
+    elif isinstance(obj, (float, np.float64, np.float32)):
+        if np.isnan(obj) or np.isinf(obj):
+            return 0.0
+        return float(obj)  # FIX 3: was falling through, returning None for valid floats
+    return obj
+
+_cache_lock = threading.Lock()
 
 def get_data_with_cache(symbol: str):
     symbol = symbol.upper()
     now = time.time()
-    
-    if symbol in cache:
-        timestamp, cached_res = cache[symbol]
-        if now - timestamp < CACHE_EXPIRY:
-            logger.info(f"Cache Hit for {symbol}")
-            return cached_res
-    
-    logger.info(f"Cache Miss/Fetch for {symbol}")
-    res = fetch_and_process(symbol)
-    
-    # only cache if data was successfully fetched
-    if res[0] is not None:
-        cache[symbol] = (now, res)
-    return res
+    with _cache_lock:
+        if symbol in cache:
+            ts, res = cache[symbol]
+            if now - ts < CACHE_EXPIRY:
+                return res
 
-# performance tracking middleware
-@app.middleware("http")
-async def log_execution_time(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    duration = time.time() - start_time
-    logger.info(f"Path: {request.url.path} | Duration: {duration:.4f}s")
-    return response
+    res = fetch_and_process(symbol)  # slow network call outside the lock
+    if res and len(res) >= 4 and res[0] is not None:
+        with _cache_lock:
+            cache[symbol] = (now, res)
+        return res
+
+    return (None, None, None, None)
+    
 
 @app.get("/companies", tags=["General"])
 async def get_companies():
-   
-    return ["AAPL", "MSFT", "TSLA", "GOOGL", "TCS.NS", "INFY.NS", "RELIANCE.NS"]
+    """Returns the map of supported symbols and company names."""
+    return {
+        "supported_symbols": list(COMPANY_MAP.keys()),
+        "company_map": COMPANY_MAP
+    }
 
-@app.get("/data/{symbol}", tags=["Stock Data"])
+@app.get("/data/{symbol}")
 async def get_stock_data(symbol: str):
-    df, predictions, _, accuracy = get_data_with_cache(symbol)
+    # Offload to threadpool to prevent freezing
+    result = await run_in_threadpool(get_data_with_cache, symbol)
     
-    if df is None:
-        raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found.")
+    
+    if result[0] is None:
+        raise HTTPException(status_code=404, detail="Symbol not found or data error.")
+    df, pred, _, acc = result
+
+    # convert DF to list and scrub all NaN/Inf values
+    raw_data = df.to_dict(orient="records")
+    safe_data = clean_for_json(raw_data)
     
     return {
         "symbol": symbol.upper(),
-        "historical_data": df.to_dict(orient="records"),
-        "ml_forecast_next_5_days": predictions,
-        "model_performance": accuracy
+        "company": COMPANY_MAP.get(symbol.upper(), "Unknown"),
+        "historical_data": safe_data,
+        "ml_forecast": clean_for_json(pred),
+        "accuracy": clean_for_json(acc)
     }
 
-@app.get("/summary/{symbol}", tags=["Stock Data"])
-async def get_summary(symbol: str):
-    _, _, summary, _ = get_data_with_cache(symbol)
+@app.get("/export/{symbol}")
+async def export_to_csv(symbol: str):
+    result = await run_in_threadpool(get_data_with_cache, symbol)
+    if result[0] is None:
+        raise HTTPException(status_code=404, detail="Data not available.")
     
-    if summary is None:
-        raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found.")
-    
-    return summary
+    stream = io.StringIO()
+    result[0].to_csv(stream, index=False)
+    stream.seek(0)
+    return StreamingResponse(stream, media_type="text/csv")
 
 @app.get("/compare", tags=["Analytics"])
 async def compare_stocks(symbol1: str, symbol2: str):
-    df1, _, _, _ = get_data_with_cache(symbol1)
-    df2, _, _, _ = get_data_with_cache(symbol2)
-    
-    if df1 is None or df2 is None:
-        raise HTTPException(status_code=404, detail="One or both symbols not found.")
-    
-    # Align dates and calculate correlation
-    combined = pd.merge(
-        df1[['Date', 'CLOSE']], 
-        df2[['Date', 'CLOSE']], 
-        on='Date', 
-        suffixes=(f'_{symbol1}', f'_{symbol2}')
+    s1, s2 = symbol1.upper(), symbol2.upper()
+
+    # Concurrent fetch
+    res1, res2 = await asyncio.gather(
+        run_in_threadpool(get_data_with_cache, s1),
+        run_in_threadpool(get_data_with_cache, s2)
     )
-    
+
+    df1, df2 = res1[0], res2[0]
+    if df1 is None or df2 is None:
+        missing = [s for s, d in [(s1, df1), (s2, df2)] if d is None]
+        raise HTTPException(status_code=404, detail=f"Symbol(s) not found: {', '.join(missing)}")
+
+    combined = pd.merge(
+        df1[['Date', 'CLOSE']],
+        df2[['Date', 'CLOSE']],
+        on='Date',
+        suffixes=(f'_{s1}', f'_{s2}')
+    )
+
+    if combined.empty:
+        return {"error": "No overlapping trading dates found."}
+
     correlation = combined.iloc[:, 1].corr(combined.iloc[:, 2])
-    
+
+    if pd.isna(correlation):
+        return {
+            "comparison": f"{COMPANY_MAP.get(s1, s1)} vs {COMPANY_MAP.get(s2, s2)}",
+            "correlation_coefficient": None,
+            "insight": "Insufficient overlapping data to compute correlation."
+        }
+
+    corr_val = round(float(correlation), 3)
     return {
-        "comparison": f"{symbol1.upper()} vs {symbol2.upper()}",
-        "correlation_coefficient": round(float(correlation), 3),
-        "insight": "Highly Correlated" if correlation > 0.7 else "Low Correlation"
+        "comparison": f"{COMPANY_MAP.get(s1, s1)} vs {COMPANY_MAP.get(s2, s2)}",
+        "correlation_coefficient": corr_val,
+        "insight": "Highly Correlated" if corr_val > 0.7 else "Moderately Correlated" if corr_val > 0.4 else "Low Correlation"
     }
 
-@app.get("/export/{symbol}", tags=["Utilities"])
-async def export_to_csv(symbol: str):
-    df, _, _, _ = get_data_with_cache(symbol)
-    if df is None:
-        raise HTTPException(status_code=404, detail="Symbol not found.")
-    
-    stream = io.StringIO()
-    df.to_csv(stream, index=False)
-    
-    return StreamingResponse(
-        iter([stream.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={symbol.upper()}_report.csv"}
-    )
+
+@app.get("/summary/{symbol}", tags=["Stock Data"])
+async def get_summary(symbol: str):
+    symbol_up = symbol.upper()
+    result = await run_in_threadpool(get_data_with_cache, symbol_up)
+
+    if not result or len(result) < 4:
+        raise HTTPException(status_code=503, detail="Data service unavailable.")
+
+    _, _, summary, _ = result
+    if summary is None:
+        raise HTTPException(status_code=404, detail=f"Symbol {symbol_up} not found.")
+
+    return {
+        "symbol": symbol_up,
+        "company_name": COMPANY_MAP.get(symbol_up, "Unknown Company"),
+        "metrics": clean_for_json(summary)
+    }
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """System status and cache monitoring."""
     return {
         "status": "online",
         "cache_entries": len(cache),
         "timestamp": time.time()
     }
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"GLOBAL CRASH: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Something went wrong inside the server.", "error": str(exc)}
+    )
