@@ -14,6 +14,8 @@ A production-ready FastAPI backend for real-time stock data, technical indicator
 - CSV export endpoint
 - Multi-stock correlation comparison
 - Dockerized deployment with Docker Compose
+  
+- 🚧 This project is under active development. Collaborators and contributions are highly welcome!
 ---
  
 ## 🗂️ Project Structure
