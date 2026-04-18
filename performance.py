@@ -9,7 +9,6 @@ def fetch_and_process(symbol: str):
     if df.empty:
         return None, None, None, None
 
-    # FIX 1: Handle MultiIndex columns from yfinance
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0].upper() for col in df.columns]
     else:
@@ -53,6 +52,7 @@ def fetch_and_process(symbol: str):
         }
     else:
         predictions, accuracy_metrics = [], {}
+
 
     df_tail = df.tail(30).reset_index()
     df_tail['Date'] = df_tail['Date'].astype(str)

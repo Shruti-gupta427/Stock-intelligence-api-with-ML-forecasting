@@ -17,6 +17,7 @@ pip-delete-this-directory.txt
 
 # Docker
 .dockerignore
+*.log 
 
 # OS specific files
 .DS_Store

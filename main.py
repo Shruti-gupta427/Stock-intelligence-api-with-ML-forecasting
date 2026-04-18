@@ -9,6 +9,9 @@ import io
 import logging
 import asyncio
 import threading
+import redis
+import pickle
+import os
 
 
 logging.basicConfig(level=logging.INFO)
@@ -40,28 +43,71 @@ def clean_for_json(obj):
     return obj
 
 _cache_lock = threading.Lock()
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+CACHE_EXPIRY = 3600
+
+try:
+    r = redis.from_url(REDIS_URL, decode_responses=False)
+    r.ping()
+    logger.info("Redis connected.")
+except Exception as e:
+    logger.warning(f"Redis unavailable, falling back to in-memory cache: {e}")
+    r = None
+
+_memory_cache = {}
+_cache_lock = threading.Lock()
 
 def get_data_with_cache(symbol: str):
     symbol = symbol.upper()
-    now = time.time()
-    with _cache_lock:
-        if symbol in cache:
-            ts, res = cache[symbol]
-            if now - ts < CACHE_EXPIRY:
-                return res
+    cache_key = f"stock:{symbol}"
 
-    res = fetch_and_process(symbol)  # slow network call outside the lock
-    if res and len(res) >= 4 and res[0] is not None:
+    # try redis 
+    if r:
+        try:
+            cached = r.get(cache_key)
+            if cached:
+                logger.info(f"Redis HIT: {symbol}")
+                return pickle.loads(cached)
+        except Exception as e:
+            logger.warning(f"Redis read failed: {e}")
+
+    # if miss
+    else:
         with _cache_lock:
-            cache[symbol] = (now, res)
-        return res
+            if cache_key in _memory_cache:
+                ts, res = _memory_cache[cache_key]
+                if time.time() - ts < CACHE_EXPIRY:
+                    logger.info(f"Memory HIT: {symbol}")
+                    return res
+
+    # fresh data
+    try:
+        res = fetch_and_process(symbol)
+        if res and len(res) >= 4 and res[0] is not None:
+
+            # store in Redis
+            if r:
+                try:
+                    r.setex(cache_key, CACHE_EXPIRY, pickle.dumps(res))
+                    logger.info(f"Redis SET: {symbol}")
+                except Exception as e:
+                    logger.warning(f"Redis write failed: {e}")
+
+            # store in memory fallback
+            else:
+                with _cache_lock:
+                    _memory_cache[cache_key] = (time.time(), res)
+
+            return res
+    except Exception as e:
+        logger.error(f"Fetch failed for {symbol}: {e}")
 
     return (None, None, None, None)
     
 
 @app.get("/companies", tags=["General"])
 async def get_companies():
-    """Returns the map of supported symbols and company names."""
+   
     return {
         "supported_symbols": list(COMPANY_MAP.keys()),
         "company_map": COMPANY_MAP
