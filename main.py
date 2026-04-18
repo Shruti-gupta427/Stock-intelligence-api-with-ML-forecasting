@@ -39,7 +39,7 @@ def clean_for_json(obj):
     elif isinstance(obj, (float, np.float64, np.float32)):
         if np.isnan(obj) or np.isinf(obj):
             return 0.0
-        return float(obj)  # FIX 3: was falling through, returning None for valid floats
+        return float(obj)  
     return obj
 
 _cache_lock = threading.Lock()
@@ -208,9 +208,17 @@ async def get_summary(symbol: str):
 
 @app.get("/health", tags=["System"])
 async def health_check():
+    redis_status = "unavailable"
+    if r:
+        try:
+            r.ping()
+            redis_status = "connected"
+        except:
+            redis_status = "error"
+
     return {
         "status": "online",
-        "cache_entries": len(cache),
+        "redis": redis_status,
         "timestamp": time.time()
     }
 
