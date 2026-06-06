@@ -9,6 +9,7 @@ def fetch_and_process(symbol: str):
     if df.empty:
         return None, None, None, None
 
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0].upper() for col in df.columns]
     else:
