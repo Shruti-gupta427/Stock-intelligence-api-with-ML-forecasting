@@ -7,7 +7,7 @@ A production-ready FastAPI backend for real-time stock data, technical indicator
 ## 🚀 Features
  
 - Real-time stock data via `yfinance`
-- Technical indicators — RSI, Moving Averages (MA7, MA20), Volatility
+- Technical indicators - RSI, Moving Averages (MA7, MA20), Volatility
 - ML price forecasting using Linear Regression
 - **Interactive chart visualization** — candlestick, volume, RSI, and ML forecast in browser
 - Redis caching with in-memory fallback
@@ -118,7 +118,7 @@ docker compose up --build -d
  
 ---
  
-## ⚠️ Network Note — College/Office Wi-Fi
+## ⚠️ Network Note - College/Office Wi-Fi
  
 If you are on a **college or office network**, Docker may fail to pull images with errors like:
  
